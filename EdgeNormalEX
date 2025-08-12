@@ -1,0 +1,157 @@
+if app.apiVersion < 1 then
+    return app.alert("This script requires Aseprite v1.2.* or newer")
+end
+
+local cel = app.activeCel
+if not cel then
+    return app.alert("There is no active image")
+end
+
+local d = Dialog("Edge Normal Map")
+d:check{
+    id = "Invert_Y",
+    label = "Invert Y:",
+    selected = true
+}:number{
+    id = "Edge_Size",
+    label = "Edge Size(px):",
+    text = "1",
+    decimals = 0
+}:slider{
+    id = "Edge_Softness",
+    label = "Edge Softness:",
+    min = 0,
+    max = 100,
+    value = 0
+}:button{
+    id = "ok",
+    text = "&OK",
+    focus = true
+}:button{
+    text = "&Cancel"
+}:show()
+
+local data = d.data
+if not data.ok then
+    return
+end
+
+local edge_size = math.max(1, tonumber(data.Edge_Size) or 1)
+local softness = math.max(0, math.min(100, tonumber(data.Edge_Softness) or 0)) / 100
+local invertY = data.Invert_Y
+
+local img0 = cel.image:clone()
+local img = cel.image:clone()
+local w, h = img.width, img.height
+local position = cel.position
+local height = 1.0
+
+if img.colorMode ~= ColorMode.RGB then
+    return app.alert("This script is only for RGB Color Mode")
+end
+
+local rgba = app.pixelColor.rgba
+local rgbaA = app.pixelColor.rgbaA
+local maxx, maxy = w - 1, h - 1
+
+-- temp alpha chanel
+local alphaData = {}
+for it in img0:pixels() do
+    local idx = it.y * w + it.x
+    alphaData[idx] = rgbaA(it()) -- 0~255
+end
+
+-- calculate normal map
+for it in img:pixels() do
+    local x, y = it.x, it.y
+    local idx = y * w + x
+    local alpha = alphaData[idx]
+
+    if alpha > 0 then
+        local gx, gy = 0.0, 0.0
+        local minDist = edge_size + 1
+        local foundEdge = false
+
+        -- domain scan
+        for dy = -edge_size, edge_size do
+            local ny = y + dy
+            if ny >= 0 and ny <= maxy then
+                for dx = -edge_size, edge_size do
+                    if not (dx == 0 and dy == 0) then
+                        local nx = x + dx
+                        if nx >= 0 and nx <= maxx then
+                            local nIdx = ny * w + nx
+                            local nAlpha = alphaData[nIdx]
+                            local diff = (nAlpha - alpha) * 0.00392156862 -- /255
+                            gx = gx + diff * dx
+                            gy = gy + diff * dy
+                            if nAlpha < 255 then
+                                foundEdge = true
+                                local dist = math.sqrt(dx * dx + dy * dy)
+                                if dist < minDist then
+                                    minDist = dist
+                                end
+                            end
+                        else
+                            foundEdge = true
+                            local dist = math.sqrt(dx * dx + dy * dy)
+                            if dist < minDist then
+                                minDist = dist
+                            end
+                            gx = gx + (-alpha * 0.00392156862) * dx
+                            gy = gy + (-alpha * 0.00392156862) * dy
+                        end
+                    end
+                end
+            else
+                foundEdge = true
+            end
+        end
+
+        -- sqrt only once
+        local invLen = 1.0 / math.sqrt(gx * gx + gy * gy + height * height)
+        local nx = gx * invLen
+        local ny = -gy * invLen
+        if invertY then
+            ny = -ny
+        end
+        local nz = height * invLen
+
+        -- add softness
+        local blendFactor = 1.0
+        if softness > 0 and foundEdge then
+            local t = math.min(1, minDist / edge_size)
+            blendFactor = 1 - (t * softness)
+        end
+
+        -- blend normal
+        local final_r = (nx * 0.5 + 0.5) * blendFactor + 0.5 * (1 - blendFactor)
+        local final_g = (ny * 0.5 + 0.5) * blendFactor + 0.5 * (1 - blendFactor)
+        local final_b = (nz * 0.5 + 0.5) * blendFactor + 1.0 * (1 - blendFactor)
+
+        it(rgba(final_r * 255, final_g * 255, final_b * 255, 255))
+    else
+        -- outline transparency
+        it(rgba(0, 0, 0, 0))
+    end
+end
+
+-- output the generated normal map to a new layer
+local sprite = app.activeSprite
+local frame = app.activeFrame
+local currentLayer = app.activeLayer
+local newLayerName = currentLayer.name .. "_NormalGenerated"
+local newLayer = nil
+for i, layer in ipairs(sprite.layers) do
+    if layer.name == newLayerName then
+        newLayer = layer
+        break
+    end
+end
+if not newLayer then
+    newLayer = sprite:newLayer()
+    newLayer.name = newLayerName
+end
+sprite:newCel(newLayer, frame, img, position)
+
+app.refresh()
